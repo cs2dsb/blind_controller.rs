@@ -1,0 +1,75 @@
+[package]
+name = "blind_controller"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esp-backtrace = { version = "0.15.0", default-features = true, features = ["panic-handler", "exception-handler", "println"], optional = true }
+esp-hal = { version = "0.23.1", default-features = true, features = ["unstable"], optional = true}
+esp-hal-embassy = { version = "0.6.0", default-features = true, features = ["executors"], optional = true }
+esp-println = { version = "0.13.0", default-features = true, features = ["log", "auto", "colors", "critical-section" ], optional = true }
+esp-wifi = { version = "0.12.0", default-features = true, features = [ "log", "wifi", "utils" ], optional = true }
+esp-alloc = { version = "0.6.0", default-features = true, features = ["nightly"], optional = true }
+esp-storage = { version = "0.4.0", default-features = true, features = [], optional = true }
+esp-ieee802154 = { version = "0.5.0", default-features = true, features = [], optional = true }
+
+smoltcp = { version = "0.12.0", default-features = false, features = [ "proto-ipv4", "proto-dhcpv4", "socket-dhcpv4", "medium-ethernet", "socket-raw"] }
+embassy-executor    = { version = "0.7.0", features = ["nightly"] }
+embassy-time = { version = "0.4" }#, features = ["defmt", "defmt-timestamp-uptime"] }
+
+log = { version = "0.4.22", default-features = false }
+
+fugit = { version = "0.3.7", default-features = false }
+embedded-hal-bus = { version = "0.2.0", default-features = false, features = [ "async" ] }
+embedded-graphics = { version = "0.8.1", default-features = false }
+
+embassy-futures = "0.1.1"
+embedded-hal-async = "1.0.0"
+embedded-hal = "1.0.0"
+picoserve = { version = "0.14.1", features = ["embassy", "log"] }
+embassy-net = { version = "0.6.0", features = ["dhcpv4", "dns", "tcp", "udp"], optional = true }
+static_cell = { version = "2.1.0", features = ["nightly"] }
+cfg-if = "1.0.0"
+heapless = "0.8.0"
+embassy-sync = { version = "0.6.2", optional = true }
+rand_core = "0.9.0"
+
+[features]
+default = [ "esp32", "dep:esp-wifi", "esp-alloc", "esp-hal-embassy" ]
+wifi = [ "dep:esp-wifi", "dep:embassy-net", "dep:embassy-sync"]
+esp32   = ["esp-hal/esp32",   "esp-backtrace/esp32",   "esp-hal-embassy?/esp32",   "esp-println/esp32",   "esp-storage?/esp32",   "esp-wifi?/esp32"]
+esp32c2 = ["esp-hal/esp32c2", "esp-backtrace/esp32c2", "esp-hal-embassy?/esp32c2", "esp-println/esp32c2", "esp-storage?/esp32c2", "esp-wifi?/esp32c2", ]
+esp32c3 = ["esp-hal/esp32c3", "esp-backtrace/esp32c3", "esp-hal-embassy?/esp32c3", "esp-println/esp32c3", "esp-storage?/esp32c3", "esp-wifi?/esp32c3"]
+esp32c6 = ["esp-hal/esp32c6", "esp-backtrace/esp32c6", "esp-hal-embassy?/esp32c6", "esp-println/esp32c6", "esp-storage?/esp32c6", "esp-wifi?/esp32c6", "esp-ieee802154?/esp32c6"]
+esp32h2 = ["esp-hal/esp32h2", "esp-backtrace/esp32h2", "esp-hal-embassy?/esp32h2", "esp-println/esp32h2", "esp-storage?/esp32h2", "esp-wifi?/esp32h2", "esp-ieee802154?/esp32h2"]
+esp32s2 = ["esp-hal/esp32s2", "esp-backtrace/esp32s2", "esp-hal-embassy?/esp32s2", "esp-println/esp32s2", "esp-storage?/esp32s2", "esp-wifi?/esp32s2"]
+esp32s3 = ["esp-hal/esp32s3", "esp-backtrace/esp32s3", "esp-hal-embassy?/esp32s3", "esp-println/esp32s3", "esp-storage?/esp32s3", "esp-wifi?/esp32s3"]
+
+[build-dependencies]
+anyhow = "1.0.95"
+dotenv = "0.15.0"
+
+[profile.release]
+codegen-units    = 1
+debug            = 2
+debug-assertions = false
+incremental      = false
+opt-level        = 3
+lto              = 'fat'
+overflow-checks  = false
+
+[profile.dev.package.esp-hal]
+opt-level = 3
+
+[profile.dev.package.esp-wifi]
+opt-level = 3
+
+
+[patch.crates-io]
+esp-backtrace = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }
+esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }
+esp-wifi = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }
+esp-alloc = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }
+esp-hal-embassy = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }
+esp-println = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }
+esp-storage = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }

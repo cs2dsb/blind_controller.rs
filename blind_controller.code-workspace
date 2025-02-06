@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"rust-analyzer.cargo.target": "xtensa-esp32-none-elf",
+		"rust-analyzer.cargo.features": ["wifi", "esp32", "esp-alloc", "esp-hal-embassy"],
+		"rust-analyzer.cargo.noDefaultFeatures": true,
+		"rust-analyzer.cargo.extraArgs": [ "-Z", "build-std=core,alloc" ],
+    	"rust-analyzer.cargo.allTargets": false,
+		"rust-analyzer.check.allTargets": false,
+		"git.ignoreLimitWarning": true,
+	}
+}

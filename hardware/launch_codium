@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Exit when any command fails
+set -o errexit
+
+# Exit when an undeclared variable is used
+set -o nounset
+
+# Exit when a piped command returns a non-zero exit code
+set -o pipefail
+
+readonly repo_dir="$( cd $(dirname ${BASH_SOURCE}); pwd )";
+cd "$repo_dir"
+
+# See https://github.com/bernhard-42/vscode-ocp-cad-viewer for vscod/codium/etc setup
+
+venv_name="build123d.venv"
+
+source "$venv_name/bin/activate"
+
+codium ./build123d.code-workspace

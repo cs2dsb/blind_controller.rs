@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+# Exit when any command fails
+set -o errexit
+
+# Exit when an undeclared variable is used
+set -o nounset
+
+# Exit when a piped command returns a non-zero exit code
+set -o pipefail
+
+readonly repo_dir="$( cd $(dirname ${BASH_SOURCE}); pwd )";
+cd "$repo_dir"
+
+venv_name="build123d.venv"
+if [ ! -d "$venv_name" ]; then
+    python3 -m venv "$venv_name"
+fi
+
+source "$venv_name/bin/activate"
+echo $PATH
+# python3 -m pip install git+https://github.com/gumyr/build123d@c0728e08036369e34ca479f3139a5ea6f8abb308
+# python3 -m pip install git+https://github.com/gumyr/bd_warehouse@d4d34e74b46177d2056cb024707063a897f065f3
+# python3 -m pip install ocp_vscode
+python3 -m pip install -r requirements.txt
+
+./launch_codium

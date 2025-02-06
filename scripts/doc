@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+# Exit when any command fails
+set -o errexit
+
+# Exit when an undeclared variable is used
+set -o nounset
+
+# Exit when a piped command returns a non-zero exit code
+set -o pipefail
+
+readonly repo_dir="$( cd $(dirname ${BASH_SOURCE}); cd ..; pwd )";
+cd "$repo_dir"
+
+cargo doc \
+    --open \
+    --target xtensa-esp32-none-elf \
+    --features esp32,esp-alloc,esp-hal-embassy,wifi \
+    --no-default-features

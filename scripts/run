@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+# Exit when any command fails
+set -o errexit
+
+# Exit when an undeclared variable is used
+set -o nounset
+
+# Exit when a piped command returns a non-zero exit code
+set -o pipefail
+
+readonly repo_dir="$( cd $(dirname ${BASH_SOURCE}); cd ..; pwd )";
+cd "$repo_dir"
+
+readonly RED='\033[0;31m';
+readonly GREEN='\033[0;32m'; 
+readonly NC='\033[0m'; # No Color
+
+warn() { echo -e "${RED}$@${NC}" >&2; }
+die() { warn "$@"; exit 1; }
+green() { echo -e "${GREEN}$@${NC}" >&2; }
+
+BIN="${BIN:-screen}"
+FEATURES="${FEATURES:-}"
+TARGET="${TARGET:-}"
+CHIP="${CHIP:-}"
+PORT=${PORT:-/dev/ttyACM0}
+
+if [ "${FEATURES:-}" != "" ]; then
+    FEATURES="--no-default-features --features $FEATURES"
+fi
+
+ESP=""
+case "$CHIP" in
+esp32)
+    ESP="+esp"
+    [ "$TARGET" == "" ] && TARGET="xtensa-esp32-none-elf" ;;
+esp32c3)
+    [ "$TARGET" == "" ] && TARGET="riscv32imc-unknown-none-elf" ;;
+esp32c6)
+    [ "$TARGET" == "" ] && TARGET="riscv32imac-unknown-none-elf" ;;
+*)
+    die "Unsupported chip: \"$CHIP\"" ;;
+esac
+
+cargo $ESP build --release --bin $BIN $FEATURES --target $TARGET
+
+while file "$PORT" | grep -q "No such file or directory"; do
+    echo "Waiting for $PORT";
+    sleep 2;
+done
+
+ESPFLASH_PORT=$PORT cargo $ESP  run --release --bin $BIN $FEATURES --target $TARGET || true
