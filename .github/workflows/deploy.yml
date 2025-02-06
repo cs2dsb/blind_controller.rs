@@ -1,0 +1,203 @@
+name: Deploy
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+
+on:
+  push:
+    branches:
+      - deploy
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pages: write 
+      id-token: write 
+      packages: write
+      attestations: write
+
+    # environment:
+    #   name: github-pages
+    #   url: ${{ steps.deploy_pages.outputs.page_url }}
+
+    steps:
+      - name: 🖴 Check disk space
+        run: df . -h
+
+      - name: 🪓Free disk space
+        run: |
+          # sudo docker rmi $(docker image ls -aq) >/dev/null 2>&1 || true
+          sudo rm -rf \
+            /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            /usr/lib/jvm || true
+          
+          sudo apt-get purge aria2 ansible azure-cli shellcheck rpm xorriso zsync \
+            esl-erlang firefox gfortran-8 gfortran-9 google-chrome-stable \
+            google-cloud-sdk imagemagick libmagickcore-dev libmagickwand-dev \
+            libmagic-dev ant ant-optional kubectl mercurial apt-transport-https \
+            mono-complete libmysqlclient unixodbc-dev yarn chrpath libssl-dev \
+            libxft-dev libfreetype6 libfreetype6-dev libfontconfig1 \
+            libfontconfig1-dev snmp pollinate libpq-dev postgresql-client \
+            powershell ruby-full sphinxsearch subversion mongodb-org azure-cli \
+            microsoft-edge-stable google-cloud-sdk microsoft-edge-stable \
+            microsoft-edge-stable '^mysql' '^php' '^dotnet' \
+            -y -f || true
+
+          sudo apt-get autoremove -y || true
+          sudo apt-get autoclean -y || true
+          
+      - name: 🖴 Check disk space
+        run: |
+          df . -h
+
+      - name: 🔧 Setup buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔎 Get tag 
+        id: tag
+        uses: dawidd6/action-get-tag@v1
+        # Because it can be kicked off manually there may not be a tag
+        continue-on-error: true
+
+      - name: 🔍 Set build suffix 
+        run: |
+          echo "SUFFIX=$([[ "${{ steps.tag.outputs.tag }}" = "" ]] && echo $GITHUB_SHA || echo ${{ steps.tag.outputs.tag }})" >> $GITHUB_ENV
+          DATE=$(date +'%Y-%m-%d_%H%M%S')
+          REPO=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}
+          
+          echo ref_name = ${{  github.ref_name }}
+          echo "DATE=$DATE" | tee -a $GITHUB_ENV
+          echo "TAG=$([[ "${{ steps.tag.outputs.tag }}" = "" ]] && echo "main_$DATE" || echo "${{ steps.tag.outputs.tag }}")" | tee -a $GITHUB_ENV
+          echo "REPO_NAME=$REPO" | tee -a $GITHUB_ENV
+          echo "REPO_OWNER=$GITHUB_REPOSITORY_OWNER" | tee -a $GITHUB_ENV
+          echo "IMAGE_TAG=${{ env.REGISTRY }}/$GITHUB_REPOSITORY_OWNER/$REPO:$([[ "${{ github.ref }}" == "refs/heads/deploy" ]] && echo "latest" || echo "main")" | tee -a $GITHUB_ENV
+          echo "IMAGE_NAME=$REPO" | tee -a $GITHUB_ENV
+
+      - name: 🛒 Checkout repo
+        uses: actions/checkout@master
+
+      - name: 🎯 Cache target dir (restore)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ env.REPO_NAME }}_target_and_registry_cache-${{ hashFiles('**/Cargo.toml') }}
+          path: |
+            target
+            cargo_registry
+          restore-keys: |
+            ${{ env.REPO_NAME }}_target_and_registry_cache-
+            ${{ env.REPO_NAME }}_target_cache-
+          save-always: true
+
+      - name: 🪲 Cache debug
+        run: |
+          mkdir -p target
+          mkdir -p cargo_registry
+          echo "Cache hit: ${{ steps.cache.outputs.cache-hit }}"
+          echo "du -sh target/*: `(cd target; du -sh *)`"
+          echo "du -sh cargo_registry/*: `(cd cargo_registry; du -sh *)`"
+          echo "tree --du -h target:"
+          tree --du -h target
+
+      - name: 🏗️ Build the project in docker
+        uses: addnab/docker-run-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          image: ghcr.io/${{ github.repository }}/rust/nightly:latest
+          options: |
+            -e RUSTUP_PERMIT_COPY_RENAME=false
+            -v ${{ github.workspace }}/:/rust
+            -v ${{ github.workspace }}/cargo_registry:/usr/local/cargo/registry
+            -w /rust
+          run: |
+            set -e
+
+            echo $CARGO_HOME:
+            (cd $CARGO_HOME; du -sh * || true)
+            echo target before:
+            (cd target; du -sh * || true)
+            
+            # Need to move these to NVS
+            echo "SSID=blah" > .env
+            echo "PASSWORD=blah" >> .env
+
+
+            . ~/export-esp.sh
+
+            # Build the ota bins
+            ./scripts/xtensa_blind-ota
+            
+            echo target after:
+            (cd target; du -sh * || true)
+            mkdir -p /rust/dist
+            cd /rust/
+            
+            # Copy the ota files
+            
+            find target -maxdepth 2 -mindepth 2 -name ota -type d -exec sh -c 'echo $(basename $(dirname {}))' \; \
+              | while read arch; do
+                ota=target/$arch/ota
+                echo "ota: $ota"
+                echo "ls ota: "; ls -l $ota || true
+                find ${ota} -type f
+                find ${ota} -type f -exec basename {} \; | while read bin; do
+                  echo "bin: $bin"
+                  cp ${ota}/${bin} dist/${bin}_${arch}
+                done
+              done
+
+            ls dist
+
+            cargo sweep --installed
+            cargo sweep --time 30
+            
+            echo target after sweep:
+            (cd target; du -sh * || true)
+      
+      - name: 🔒 Fix the permissions after docker mucked them up
+        run: |
+          sudo chown -R $USER:$USER "${{ github.workspace }}"
+
+      - name: 🪲 Cache debug after run
+        run: |
+          echo "du -sh *: `(du -sh * || true)`"
+          echo "du -sh target/*: `(cd target; du -sh * || true)`"
+          echo "du -sh cargo_registry/*: `(cd cargo_registry; du -sh * || true)`"
+
+      - name: 🔑 Log into registry ${{ env.REGISTRY }} 
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📡 Upload release 
+        uses: svenstaro/upload-release-action@v2
+        # if: github.ref == 'refs/heads/deploy'
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: "dist/*"
+          tag: ${{ env.TAG }}
+          overwrite: true
+          file_glob: true
+          prerelease: true
+
+      - name: 📨 Release release 
+        # if: github.ref == 'refs/heads/deploy'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: "README.md"
+          tag: ${{ env.TAG }}
+          overwrite: true
+          promote: true
+          prerelease: false
