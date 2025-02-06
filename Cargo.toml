@@ -64,6 +64,9 @@ opt-level = 3
 [profile.dev.package.esp-wifi]
 opt-level = 3
 
+[profile.dev.package.esp-storage]
+opt-level = 3
+
 
 [patch.crates-io]
 esp-backtrace = { git = "https://github.com/esp-rs/esp-hal.git", rev = "18ef297a4791e32a719a4ab1f670e26d8cdef3b2" }

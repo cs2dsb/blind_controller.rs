@@ -1,0 +1,27 @@
+FROM rustlang/rust:nightly AS builder
+RUN apt-get update && apt-get install -y tree gcc build-essential curl pkg-config libudev-dev
+WORKDIR /rust
+
+
+RUN <<EOF
+release_date=`date -d "yesterday" +%F`
+cat >rust-toolchain.toml <<EO2
+[toolchain]
+channel = "nightly-${release_date}"
+targets = ["riscv32imc-unknown-none-elf", "riscv32imac-unknown-none-elf"]
+EO2
+cat rust-toolchain.toml
+rustup show
+EOF
+
+# Install the esp toolchain
+ARG RUST_BACKTRACE=full
+RUN cargo install --locked espup espflash cargo-sweep
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \
+    espup install --targets "esp32" \
+        --log-level debug \
+        --export-file ~/export-esp.sh
+
+COPY rust-toolchain.toml .
+
+RUN rm -rf $CARGO_HOME/registry/*
