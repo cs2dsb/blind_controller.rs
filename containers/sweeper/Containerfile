@@ -1,0 +1,9 @@
+FROM ghcr.io/cs2dsb/blind_controller.rs/rust/nightly:latest AS builder
+WORKDIR /rust
+
+COPY . .
+
+ARG CARGO_HOME=/rust/target/cargo_home
+RUN \
+    --mount=type=cache,target=/rust/target,sharing=locked \
+    cargo sweep --installed && cargo sweep --time 30 
