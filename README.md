@@ -16,6 +16,7 @@
 
 * `BLIND_HEIGHT` is measured in steps so it's easiest to determine experimentally - raise the blind up manually then navigate to `<ESP_IP>/backward/<n>` where `n` is a number of steps (100 is about an inch in my setup) and refresh until the blind reaches the bottom, keeping track of the total
 * [bootstrap](scripts/bootstrap) contains the commands to install the xtensa toolchain
+* Local build with `.env` containing SSID and PASSWORD required for the first run, after the first run these will be saved to NVS and will perist through future flashes both locally and OTA
 
 
 ## Wiring

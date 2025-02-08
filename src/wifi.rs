@@ -26,6 +26,9 @@ use rand_core::RngCore;
 
 use crate::{mk_static, rng::RngWrapper};
 
+pub const SSID_MAX_LEN: usize = 32;
+pub const PASSWORD_LEN: usize = 64;
+
 pub const STACK_SOCKET_COUNT: usize = 12;
 
 #[ram(rtc_fast)]
@@ -211,7 +214,7 @@ pub fn connect<T: TimerGroupInstance>(
     wifi: WIFI,
     radio_clock_control: RADIO_CLK,
     // clocks: &Clocks<'_>,
-    (ssid, password): (String<32>, String<64>),
+    (ssid, password): (String<SSID_MAX_LEN>, String<PASSWORD_LEN>),
 ) -> Result<WifiPendingHandle, WifiError> {
     let mut rng_wrapper = RngWrapper::from(rng.clone());
     let seed = rng_wrapper.next_u64();

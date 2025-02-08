@@ -124,11 +124,6 @@ jobs:
             (cd $CARGO_HOME; du -sh * || true)
             echo target before:
             (cd target; du -sh * || true)
-            
-            # Need to move these to NVS
-            echo "SSID=blah" > .env
-            echo "PASSWORD=blah" >> .env
-
 
             . ~/export-esp.sh
 
