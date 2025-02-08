@@ -1,5 +1,9 @@
 FROM rustlang/rust:nightly AS builder
-RUN apt-get update && apt-get install -y tree gcc build-essential curl pkg-config libudev-dev
+RUN apt-get update && apt-get install -y \
+    tree \
+    libudev-dev \
+    gcc build-essential curl pkg-config \
+    git wget flex bison gperf python3 python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
 WORKDIR /rust
 
 

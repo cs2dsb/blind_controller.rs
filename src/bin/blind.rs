@@ -5,7 +5,7 @@
 
 use core::{convert::Infallible, fmt::Write};
 
-use blind_controller::{logging, wifi};
+use blind_controller::{logging, nvs::{self, Nvs, MIN_OFFSET}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
 use embassy_executor::Spawner;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -26,7 +26,7 @@ use esp_hal::{
     Config as HalConfig,
 };
 use esp_hal_embassy::main;
-use heapless::String;
+use heapless::{String, Vec};
 use log::*;
 use picoserve::{
     routing::{get, parse_path_segment},
@@ -38,8 +38,8 @@ const HEAP_MEMORY_SIZE: usize = 72 * 1024;
 // -3 is to reserve some for outgoing socket requests
 const WEB_TASK_POOL_SIZE: usize = wifi::STACK_SOCKET_COUNT - 3;
 
-const SSID: &str = env!("SSID");
-const PASSWORD: &str = env!("PASSWORD");
+const SSID: Option<&str> = option_env!("SSID");
+const PASSWORD: Option<&str> = option_env!("PASSWORD");
 
 const BLIND_HEIGHT: usize = 4450;
 
@@ -212,6 +212,10 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
     let wake_reason = wakeup_cause();
     info!("Reset reason: {reset_reason:?}, Wake reason: {wake_reason:?}");
 
+    debug!("NVS partition: {NVS_PARTITION:?}");
+    debug!("OTA_0 partition: {OTA_0_PARTITION:?}");
+    debug!("OTA_1 partition: {OTA_1_PARTITION:?}");
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let rng = Rng::new(peripherals.RNG);
 
@@ -227,8 +231,78 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
     }
     trace!("esp_hal_embassy::init done");
 
-    let ssid = String::<32>::try_from(SSID).map_err(|()| Error::ParseCredentials)?;
-    let password = String::<64>::try_from(PASSWORD).map_err(|()| Error::ParseCredentials)?;
+    let mut nvs = Nvs::new();
+
+    let (ssid, password) = if let (Some(ssid), Some(password)) = (SSID, PASSWORD) {
+        let ssid = String::<SSID_MAX_LEN>::try_from(ssid).map_err(|()| Error::ParseCredentials)?;
+        let password = String::<PASSWORD_LEN>::try_from(password).map_err(|()| Error::ParseCredentials)?;
+
+        debug!("Using SSID and password embedded in binary");
+
+        nvs.set_valid(false)?;
+        
+        let ssid_len = [ssid.len() as u8];
+        let ssid_bytes = ssid.as_bytes();
+
+        let password_len = [password.len() as u8];
+        let password_bytes = password.as_bytes();
+
+        nvs.write(MIN_OFFSET, &ssid_len)?;
+        nvs.write(MIN_OFFSET + 1, ssid_bytes)?;
+
+        nvs.write(MIN_OFFSET + 1 + SSID_MAX_LEN as u32, &password_len)?;
+        nvs.write(MIN_OFFSET + 1 + SSID_MAX_LEN as u32 + 1, password_bytes)?;
+
+        nvs.set_valid(true)?;
+
+        debug!("SSID and password saved to NVS");
+
+        (ssid, password)
+    } else {
+        if nvs.is_valid()? {
+            debug!("Using SSID and password from NVS");
+
+            let mut ssid = Vec::<u8, SSID_MAX_LEN>::new();
+            let mut password = Vec::<u8, PASSWORD_LEN>::new();
+
+            let mut len = [0_u8];
+
+            nvs.read(MIN_OFFSET, &mut len)?;
+            ssid.resize(len[0] as usize, 0).map_err(|()| Error::ParseCredentials)?;
+            nvs.read(MIN_OFFSET + 1, ssid.as_mut_slice())?;
+    
+            nvs.read(MIN_OFFSET + 1 + SSID_MAX_LEN as u32, &mut len)?;
+            password.resize(len[0] as usize, 0).map_err(|()| Error::ParseCredentials)?;
+            nvs.read(MIN_OFFSET + 1 + SSID_MAX_LEN as u32 + 1, password.as_mut_slice())?;
+
+            let ssid = match String::from_utf8(ssid) {
+                Ok(str) => Some(str),
+                Err(_) => {
+                    error!("SSID from NVS was invalid utf8");
+                    None
+                },
+            };
+
+            let password = match String::from_utf8(password) {
+                Ok(str) => Some(str),
+                Err(_) => {
+                    error!("Password from NVS was invalid utf8");
+                    None
+                },
+            };
+
+            if ssid.is_none() || password.is_none() {
+                nvs.set_valid(false)?;
+                Err(Error::ParseCredentials)?;
+            }
+
+            debug!("NVS credentials valid");
+            
+            (ssid.unwrap(), password.unwrap())
+        } else {
+            Err(Error::MissingCredentials)?
+        }
+    };
 
     let pending_handle = wifi::connect(
         &spawner,
@@ -288,8 +362,11 @@ pub enum Error {
 
     /// Error while parsing SSID or password
     ParseCredentials,
+    MissingCredentials,
 
     Wifi(wifi::WifiError),
+
+    Nvs(nvs::Error),
 
     Timeout(&'static str),
 }
@@ -303,5 +380,11 @@ impl From<Infallible> for Error {
 impl From<wifi::WifiError> for Error {
     fn from(value: wifi::WifiError) -> Self {
         Self::Wifi(value)
+    }
+}
+
+impl From<nvs::Error> for Error {
+    fn from(value: nvs::Error) -> Self {
+        Self::Nvs(value)
     }
 }

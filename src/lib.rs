@@ -2,6 +2,7 @@
 #![feature(sync_unsafe_cell)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(never_type)]
+#![feature(const_size_of_val)]
 
 #[macro_export]
 macro_rules! mk_static {
@@ -15,6 +16,10 @@ macro_rules! mk_static {
 
 pub mod logging;
 pub mod rng;
+pub mod partitions;
+
+#[cfg(feature = "wifi")]
+pub mod nvs;
 
 #[cfg(feature = "wifi")]
 pub mod wifi;
