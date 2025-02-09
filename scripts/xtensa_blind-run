@@ -13,5 +13,10 @@ readonly repo_dir="$( cd $(dirname ${BASH_SOURCE}); cd ..; pwd )";
 cd "$repo_dir"
 
 PORT=${PORT:-/dev/ttyUSB0}
+ERASE=${ERASE:-false}
+
+if [ "$ERASE" == "true" ]; then
+    ESPFLASH_PORT=$PORT espflash erase-flash
+fi
 
 BIN=blind FEATURES=esp32,esp-alloc,esp-hal-embassy,wifi PORT=$PORT CHIP=esp32 scripts/run

@@ -18,8 +18,11 @@ pub mod logging;
 pub mod rng;
 pub mod partitions;
 
-#[cfg(feature = "wifi")]
+#[cfg(feature = "storage")]
 pub mod nvs;
+
+#[cfg(feature = "storage")]
+pub mod ota;
 
 #[cfg(feature = "wifi")]
 pub mod wifi;

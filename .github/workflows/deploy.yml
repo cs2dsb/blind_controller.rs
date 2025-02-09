@@ -140,6 +140,9 @@ jobs:
                 find ${ota} -type f -exec basename {} \; | while read bin; do
                   cp ${ota}/${bin} dist/${bin}_${arch}
                 done
+                find target/$arch -name BUILD_DATE | while read bd; do
+                  cp "${bd}" dist/BUILD_DATE_${arch}
+                done
               done
 
             cargo sweep --installed

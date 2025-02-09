@@ -19,15 +19,14 @@ impl From<FlashStorageError> for Error {
     }
 }
 
-pub struct Nvs {
-    flash: FlashStorage,
+pub struct Nvs<'a> {
+    flash: &'a mut FlashStorage,
     offset: u32,
     size: u32,
 }
 
-impl Nvs {
-    pub fn new() -> Self {
-        let flash = FlashStorage::new();
+impl<'a> Nvs<'a> {
+    pub fn new(flash: &'a mut FlashStorage) -> Nvs<'a> {
         debug!("Flash size: 0x{:x?}, NVS: {NVS_PARTITION:?}", flash.capacity());
 
         let offset = NVS_PARTITION.offset;
