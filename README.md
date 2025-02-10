@@ -35,7 +35,7 @@
 1. NTP time sync so the esp can automate raising and lowering without being prompted over http
 1. OTA flashing (started [ota_build](scripts/ota_build) but not sure there's a non-idf OTA crate currently)
 1. Hardware stepping - currently the step line is being bit banged with embassy sleeps in between. It works ok but it's rough, not very accurate and leaving a chunk of speed on the table. The RMT peripheral can be configured with acceleration sequences and can run the whole step sequence in hardware.
-
+1. Context on errors (for example parsing build number would be nice to have a .context("Failed to parse {string} as blah blah"))
 
 ## License
 

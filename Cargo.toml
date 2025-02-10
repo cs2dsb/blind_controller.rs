@@ -37,6 +37,14 @@ embassy-sync = { version = "0.6.2", optional = true }
 rand_core = "0.9.0"
 embedded-storage = "0.3.1"
 crc = "3.2.1"
+const_format = "0.2.34"
+reqwless = { version = "0.13.0", features = [
+    "embedded-tls",
+    # alloc enabled to get around these issues. When they are closed alloc won't be needed
+    # https://github.com/drogue-iot/embedded-tls/issues/136
+    # https://github.com/drogue-iot/reqwless/issues/96
+    "alloc", 
+]}
 
 [features]
 default = [ "esp32", "dep:esp-wifi", "esp-alloc", "esp-hal-embassy" ]

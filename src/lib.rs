@@ -26,3 +26,6 @@ pub mod ota;
 
 #[cfg(feature = "wifi")]
 pub mod wifi;
+
+#[cfg(feature = "wifi")]
+pub mod http;

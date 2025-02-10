@@ -3,9 +3,10 @@
 #![feature(sync_unsafe_cell)]
 #![feature(impl_trait_in_assoc_type)]
 
-use core::{convert::Infallible, fmt::Write};
+use core::{convert::Infallible, fmt::Write, num::ParseIntError, str::Utf8Error};
 
-use blind_controller::{logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
+use blind_controller::{http, logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
+use const_format::concatcp;
 use embassy_executor::Spawner;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -45,6 +46,9 @@ const BUILD_DATE: i64 = { match i64::from_str_radix(env!("BUILD_DATE"), 10) {
     Ok(v) => v,
     Err(_) => panic!("BUILD_DATE env variable failed to parse as i64"),
 }};
+const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
+const RELEASE_URL: &str = "https://github.com/cs2dsb/blind_controller.rs/releases/latest/download/";
+const BUILD_DATE_URL: &str = concatcp!(RELEASE_URL, "BUILD_DATE_", TARGET_TRIPLE); 
 
 const BLIND_HEIGHT: usize = 4450;
 
@@ -325,6 +329,25 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
     let (_handle, stacks) = pending_handle.wait_for_connection().await;
     trace!("Connected");
 
+    let stack = stacks.tcp.stack();
+
+    let mut http_client = http::Client::new(stack, rng);
+    let build_date = {
+        let bytes = http_client.req::<20, _>(BUILD_DATE_URL).await?;
+        let string = String::from_utf8(bytes)?;
+        
+        i64::from_str_radix(&string, 10)?
+    };
+    debug!("Build dates. Local: {BUILD_DATE}, remote: {build_date}");
+    if build_date > BUILD_DATE {
+        info!("Update available!")
+    } else {
+        info!("No update available");
+    }
+
+    loop { Timer::after_secs(10).await }
+
+    #[allow(unreachable_code)]
     let mut _ota = Ota::new(&mut flash);
     // ota.read_select_entries()?;
     // loop { Timer::after_secs(10).await }
@@ -383,6 +406,12 @@ pub enum Error {
     Nvs(nvs::Error),
     Ota(ota::Error),
 
+    Http(http::Error),
+
+    Utf8Error(Utf8Error),
+
+    ParseIntError(ParseIntError),
+
     Timeout(&'static str),
 }
 
@@ -407,5 +436,23 @@ impl From<nvs::Error> for Error {
 impl From<ota::Error> for Error {
     fn from(value: ota::Error) -> Self {
         Self::Ota(value)
+    }
+}
+
+impl From<http::Error> for Error {
+    fn from(value: http::Error) -> Self {
+        Self::Http(value)
+    }
+}
+
+impl From<Utf8Error> for Error {
+    fn from(value: Utf8Error) -> Self {
+        Self::Utf8Error(value)
+    }
+}
+
+impl From<ParseIntError> for Error {
+    fn from(value: ParseIntError) -> Self {
+        Self::ParseIntError(value)
     }
 }

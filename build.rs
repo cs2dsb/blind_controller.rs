@@ -21,5 +21,7 @@ fn main() -> Result<(), anyhow::Error> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     fs::write(out_dir.join("BUILD_DATE"), format!("{millis}"))?;
 
+    println!("cargo:rustc-env=TARGET_TRIPLE={}", env::var("TARGET")?);
+
     Ok(())
 }
