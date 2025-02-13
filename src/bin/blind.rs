@@ -55,7 +55,7 @@ fn init_heap() {
 }
 
 // -3 is to reserve some for outgoing socket requests
-const WEB_TASK_POOL_SIZE: usize = 2;//wifi::STACK_SOCKET_COUNT - 3;
+const WEB_TASK_POOL_SIZE: usize = 2; // wifi::STACK_SOCKET_COUNT - 3;
 
 const SSID: Option<&str> = option_env!("SSID");
 const PASSWORD: Option<&str> = option_env!("PASSWORD");
@@ -422,6 +422,7 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
         }).await?;
 
         ota.commit_update()?;
+        *UPDATE_PENDING.lock().await = true;
     }
 
     let channel = mk_static!(Channel::<CriticalSectionRawMutex, StepCommand, 10>, Channel::new());
