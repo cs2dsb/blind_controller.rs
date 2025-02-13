@@ -5,7 +5,6 @@ use core::fmt;
 use esp_storage::{FlashStorage, FlashStorageError};
 use embedded_storage::{ReadStorage, Storage};
 use log::debug;
-use log::trace;
 use log::warn;
 
 use crate::partitions::OTA_0_PARTITION;
@@ -26,7 +25,7 @@ const CRC_ALGO: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::Algorithm {
 
 // From <https://github.com/espressif/esp-idf/blob/c5865270b50529cd32353f588d8a917d89f3dba4/components/bootloader_support/include/esp_flash_partitions.h#L67-L75>
 #[repr(u32)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(unused)]
 enum OtaSelectEntryState {
     New             = 0x0,         // Monitor the first boot. In bootloader this state is changed to ESP_OTA_IMG_PENDING_VERIFY
@@ -174,6 +173,7 @@ impl SelectEntrySlot {
 #[derive(Debug)]
 pub enum Error {
     ChecksumInvalid,
+    TooLarge,
     Storage(FlashStorageError),
 }
 
@@ -185,103 +185,73 @@ impl From<FlashStorageError> for Error {
 
 pub struct Ota<'a> {
     flash: &'a mut FlashStorage,
+    update_state: Option<(Slot, u32)>,
 }
 
 impl<'a> Ota<'a> {
     pub fn new(flash: &'a mut FlashStorage) -> Ota<'a> {
         debug!("OTA data partition: {OTA_DATA_PARTITION:?}");
-        Self { flash }
+        Self { flash, update_state: None }
     }
 
-    pub fn read_select_entries(&mut self) -> Result<(), Error> {
-        let (s0, s1) = self.get_slot_seq();
-        let (s0_, s1_) = self.get_slot_seq_new()?;
+    pub fn prepare_for_update(&mut self) -> Result<(), Error> {
+        let update_slot = self.update_slot()?;
+        self.update_state = Some((update_slot, 0));
+        Ok(())
+    }
 
-        debug!("Old: 0x{s0:x}, 0x{s1:x}");
-        debug!("New: 0x{s0_:x}, 0x{s1_:x}");
+    pub fn commit_update(&mut self) -> Result<(), Error> {
+        // TODO: checksum?
+        let (slot, _offset) = self.update_state.take().expect("commit_update called with no update in progress. Call prepare_for_update first");
+        self.set_current_slot(slot)?;
+        Ok(())
+    }
 
-        let old_slot = self.current_slot();
-        let new_slot = self.current_slot_new()?;
-        debug!("Old: {old_slot:?}");
-        debug!("New: {new_slot:?}");
+    pub fn write_update(&mut self, buf: &[u8]) -> Result<(), Error> {
+        let (slot, offset) = self.update_state.as_mut().expect("write_update called with no update in progress. Call prepare_for_update first");
+        let len = buf.len();
+        
+        if *offset + len as u32 > slot.size() {
+            Err(Error::TooLarge)?;
+        }
 
-        // assert_eq!(s0, s0_);
-        // assert_eq!(s1, s1_);
-        // assert_eq!(old_slot, new_slot);
-
-        self.set_current_slot(new_slot.next())?;
-
-
-        debug!("size: {}, chunk: {}", OTA_0_PARTITION.size, FlashStorage::SECTOR_SIZE);
-
-        assert!(OTA_0_PARTITION.size == OTA_1_PARTITION.size);
-
-        if new_slot == Slot::Slot0 {
-            const SECTOR_SIZE: usize = FlashStorage::SECTOR_SIZE as usize;
-            const PART_SIZE: usize = OTA_0_PARTITION.size as usize;
-            let mut buf = [0_u8; SECTOR_SIZE];
-            let mut chunks =PART_SIZE / SECTOR_SIZE;
-            if chunks * SECTOR_SIZE > PART_SIZE {
-                chunks += 1;
-            }
-
-            for i in 0..chunks {
-                let buf = &mut buf[0..SECTOR_SIZE.min(PART_SIZE - SECTOR_SIZE*i)];
-                trace!("Reading {i} [{}]", buf.len());
-                self.flash.read(OTA_0_PARTITION.offset + (i * SECTOR_SIZE) as u32, buf)?;
-                trace!("Writing {i}");
-                self.flash.write(OTA_1_PARTITION.offset + (i * SECTOR_SIZE) as u32, buf)?;
-            }
+        if len > 0 {
+            let final_offset = slot.offset() + *offset;
+            self.flash.write(final_offset, buf)?;    
+            *offset += len as u32;
         } else {
-            trace!("Booted from copied fw!");
+            warn!("write_update called with 0 length buffer");
         }
 
         Ok(())
     }
 
-    fn get_slot_seq(&mut self) -> (u32, u32) {
-        let mut buffer1 = [0u8; 0x20];
-        let mut buffer2 = [0u8; 0x20];
-        self.flash.read(0xd000, &mut buffer1).unwrap();
-        self.flash.read(0xe000, &mut buffer2).unwrap();
-        let mut seq0bytes = [0u8; 4];
-        let mut seq1bytes = [0u8; 4];
-        seq0bytes[..].copy_from_slice(&buffer1[..4]);
-        seq1bytes[..].copy_from_slice(&buffer2[..4]);
-        let seq0 = u32::from_le_bytes(seq0bytes);
-        let seq1 = u32::from_le_bytes(seq1bytes);
-        (seq0, seq1)
-    }
+    pub fn update_slot(&mut self) -> Result<Slot, Error> {
 
-    pub fn current_slot(&mut self) -> Slot {
-        let (seq0, seq1) = self.get_slot_seq();
+        let [entry0, entry1] = self.get_ota_entries()?;
+        
+        debug!("Entry0: {entry0:?}");
+        debug!("Entry1: {entry1:?}");
 
-        if seq0 == 0xffffffff && seq1 == 0xffffffff {
-            Slot::None
-        } else if seq0 == 0xffffffff {
-            Slot::Slot1
-        } else if seq1 == 0xffffffff {
-            Slot::Slot0
-        } else if seq0 > seq1 {
-            Slot::Slot0
-        } else {
-            Slot::Slot1
+        // If either slot is invalid, that's the update slot because we don't want to overwrite the current running firmware
+        if entry0.ota_state != OtaSelectEntryState::Valid {
+            return Ok(Slot::Slot0);
+        } else if entry1.ota_state != OtaSelectEntryState::Valid {
+            return Ok(Slot::Slot1);
         }
-    }
 
-    pub fn current_slot_new(&mut self) -> Result<Slot, Error> {
-        let (seq0, seq1) = self.get_slot_seq_new()?;
+        let (seq0, seq1) = self.get_slot_seq()?;
 
         let slot = if seq0 == 0xffffffff && seq1 == 0xffffffff {
-            Slot::None
+            Slot::Slot1
         } else if seq0 == 0xffffffff {
-            Slot::Slot1
+            Slot::Slot0
         } else if seq1 == 0xffffffff {
-            Slot::Slot0
-        } else if seq0 > seq1 {
-            Slot::Slot0
-        } else {
             Slot::Slot1
+        } else if seq0 > seq1 {
+            Slot::Slot1
+        } else {
+            Slot::Slot0
         };
 
         Ok(slot)
@@ -291,7 +261,7 @@ impl<'a> Ota<'a> {
         OtaSelectEntry::read(slot, &mut self.flash)
     }
 
-    fn get_slot_seq_new(&mut self) -> Result<(u32, u32), Error> {
+    fn get_slot_seq(&mut self) -> Result<(u32, u32), Error> {
         let entry0 = self.get_ota_entry(SelectEntrySlot::Zero)?;
         let entry1 = self.get_ota_entry(SelectEntrySlot::One)?;
 
@@ -316,7 +286,7 @@ impl<'a> Ota<'a> {
         Ok([entry0, entry1])
     }
 
-    pub fn set_current_slot(&mut self, slot: Slot) -> Result<(), Error> {
+    pub fn set_current_slot(&mut self, expected_slot: Slot) -> Result<(), Error> {
         let [mut entry0, mut entry1] = self.get_ota_entries()?;
         
         debug!("Entry0: {entry0:?}");
@@ -335,55 +305,60 @@ impl<'a> Ota<'a> {
         }
 
         
-        let (entry0_dirty, entry1_dirty) = match (&entry0, &entry1) {
+        let (seq, slot) = match (&entry0, &entry1) {
             // No slot is current. Only valid when there is a factory partition in addition to the 2 OTA partitions
             (OtaSelectEntry { ota_seq: _seq0 @ 0xFFFFFFFF, .. }, 
              OtaSelectEntry { ota_seq: _seq1 @ 0xFFFFFFFF, .. }) => {
-                entry0.ota_seq = 1;
-                (true, false)
+                (1, Slot::Slot0)
             },
              // Slot 1 contains a valid image
             (OtaSelectEntry { ota_seq: _seq0 @ 0xFFFFFFFF, .. }, 
              OtaSelectEntry { ota_seq: seq1 @ ..0xFFFFFFFF, .. }) => {
-                entry0.ota_seq = seq1 + 1;
-                (true, false)
+                (seq1 + 1, Slot::Slot0)
             },
             // Slot 0 contains a valid image
            (OtaSelectEntry { ota_seq: seq0 @ ..0xFFFFFFFF, .. }, 
             OtaSelectEntry { ota_seq: _seq1 @ 0xFFFFFFFF, .. }) => {
-               entry1.ota_seq = seq0 + 1;
-               (false, true)
+                (seq0 + 1, Slot::Slot1)
            },
            // Both slots contain valid images
            (OtaSelectEntry { ota_seq: seq0 @ ..0xFFFFFFFF, .. }, 
             OtaSelectEntry { ota_seq: seq1 @ ..0xFFFFFFFF, .. }) => if seq1 > seq0 {
-                entry0.ota_seq = seq1 + 1;
-                (true, false)
+                (seq1 + 1, Slot::Slot0)
             } else {
-                entry1.ota_seq = seq0 + 1;
-                (false, true)
+                (seq0 + 1, Slot::Slot1)
            },
         };
-        assert!(!(entry0_dirty == true && entry1_dirty == true), "Both slots cannot both be marked as dirty");
-        assert!(!(entry0_dirty == false && entry1_dirty == false), "Both slots cannot both be marked as not dirty");
+        
+        let slot = match (entry0.ota_state, entry1.ota_state) {
+            // Both valid, use the slot selected above
+            (OtaSelectEntryState::Valid, OtaSelectEntryState::Valid) => slot,
+            // 0 valid, 1 something else
+            (OtaSelectEntryState::Valid, _) => Slot::Slot1,
+            // 1 valid, 0 something else
+            (_, OtaSelectEntryState::Valid) => Slot::Slot0,
+            // Neither valid...
+            _ => {
+                warn!("Both OTA partitions in !valid state");
+                // Most likely factory boot
+                Slot::Slot1
+            },
+        };
 
-        if entry0_dirty {
-            assert_eq!(slot, Slot::Slot0);
-            debug!("OtaSelectEntry[0] sequence updated to {}", entry0.ota_seq);
-            entry0.ota_state = OtaSelectEntryState::New;
-            entry0.write(SelectEntrySlot::Zero, &mut self.flash, true)?;
+        assert_eq!(slot, expected_slot);
 
-            let check = self.get_ota_entry(SelectEntrySlot::Zero)?;
-            debug!("E0w: {entry0:?}");
-            debug!("E0r: {check:?}");
-        }
+        debug!("Committing update to {slot:?}");
+        let (entry, entry_slot) = match slot {
+            Slot::Slot0 => (&mut entry0, SelectEntrySlot::Zero),
+            _ => (&mut entry1, SelectEntrySlot::One),
+        };
 
-        if entry1_dirty {
-            assert_eq!(slot, Slot::Slot1);
-            debug!("OtaSelectEntry[1] sequence updated to {}", entry1.ota_seq);
-            entry1.ota_state = OtaSelectEntryState::New;
-            entry1.write(SelectEntrySlot::One, &mut self.flash, true)?;
-        }
+        debug!("seq: {} -> {}", entry.ota_seq, seq);
+        entry.ota_seq = seq;
+        entry.ota_state = OtaSelectEntryState::New;
+
+        entry.write(entry_slot, &mut self.flash, true)?;
+        debug!("Entry written");
 
         Ok(())
     }
@@ -410,6 +385,20 @@ impl Slot {
             Slot::None => Slot::Slot0,
             Slot::Slot0 => Slot::Slot1,
             Slot::Slot1 => Slot::Slot0,
+        }
+    }
+
+    pub fn offset(&self) -> u32 {
+        match self.number() {
+            0 => OTA_0_PARTITION.offset,
+            _ => OTA_1_PARTITION.offset,
+        }
+    }
+
+    pub fn size(&self) -> u32 {
+        match self.number() {
+            0 => OTA_0_PARTITION.size,
+            _ => OTA_1_PARTITION.size,
         }
     }
 }

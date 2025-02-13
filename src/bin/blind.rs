@@ -5,7 +5,8 @@
 
 use core::{convert::Infallible, fmt::Write, num::ParseIntError, str::Utf8Error};
 
-use blind_controller::{http, logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
+use blind_controller::{http::{self, CallbackError}, logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
+use chrono::TimeZone;
 use const_format::concatcp;
 use embassy_executor::Spawner;
 use embassy_sync::{
@@ -13,7 +14,6 @@ use embassy_sync::{
     channel::{Channel, Receiver, Sender},
 };
 use embassy_time::{Duration, Timer};
-use esp_alloc::heap_allocator;
 // For panic-handler
 use esp_backtrace as _;
 use esp_hal::{
@@ -31,11 +31,25 @@ use esp_storage::FlashStorage;
 use heapless::{String, Vec};
 use log::*;
 use picoserve::{
-    routing::{get, parse_path_segment},
-    AppBuilder, AppRouter,
+    response::IntoResponse, routing::{get, parse_path_segment}, AppBuilder, AppRouter
 };
 
-const HEAP_MEMORY_SIZE: usize = 72 * 1024;
+const HEAP_MEMORY_SIZE: usize =  72 * 1024;
+
+// TODO: bump to latest version of esp-alloc which supports passing the link section into it's macro
+#[link_section = ".dram2_uninit"] 
+static mut HEAP: core::mem::MaybeUninit<[u8; HEAP_MEMORY_SIZE]> = core::mem::MaybeUninit::uninit();
+
+#[allow(static_mut_refs)]
+fn init_heap() {
+    unsafe {
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            HEAP.as_mut_ptr() as *mut u8,
+            HEAP_MEMORY_SIZE,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
+}
 
 // -3 is to reserve some for outgoing socket requests
 const WEB_TASK_POOL_SIZE: usize = wifi::STACK_SOCKET_COUNT - 3;
@@ -48,7 +62,9 @@ const BUILD_DATE: i64 = { match i64::from_str_radix(env!("BUILD_DATE"), 10) {
 }};
 const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
 const RELEASE_URL: &str = "https://github.com/cs2dsb/blind_controller.rs/releases/latest/download/";
+// const RELEASE_URL: &str = "https://www.covvee.com/static/covvee/blind/";
 const BUILD_DATE_URL: &str = concatcp!(RELEASE_URL, "BUILD_DATE_", TARGET_TRIPLE); 
+const FIRMWARE_URL: &str = concatcp!(RELEASE_URL, "blind_", TARGET_TRIPLE); 
 
 const BLIND_HEIGHT: usize = 4450;
 
@@ -98,12 +114,22 @@ struct AppProps {
     sender: Sender<'static, CriticalSectionRawMutex, StepCommand, 10>,
 }
 
+impl AppProps {
+    async fn index() -> impl IntoResponse {
+        let build_date = chrono::Utc.timestamp_millis_opt(BUILD_DATE).single().expect("Invalid build date in binary");
+        let mut buf = String::<64>::new();
+        let _ = write!(&mut buf, "Build date: {build_date:?}");
+        buf
+    }
+}
+
 impl AppBuilder for AppProps {
     type PathRouter = impl picoserve::routing::PathRouter;
 
     fn build_app(self) -> picoserve::Router<Self::PathRouter> {
         let Self { sender } = self;
         picoserve::Router::new()
+            .route("/", get(|| Self::index()))
             .route(
                 ("/forward", parse_path_segment::<usize>()),
                 get(move |n| async move {
@@ -202,7 +228,8 @@ async fn main(spawner: Spawner) {
     });
     trace!("hal::init done");
 
-    heap_allocator!(HEAP_MEMORY_SIZE);
+    // heap_allocator!(HEAP_MEMORY_SIZE);
+    init_heap();
 
     if let Err(error) = main_fallible(&spawner, peripherals).await {
         error!("Error while running firmware: {:?}", error);
@@ -221,7 +248,8 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
     let wake_reason = wakeup_cause();
     info!("Reset reason: {reset_reason:?}, Wake reason: {wake_reason:?}");
 
-    debug!("BUILD_DATE: {BUILD_DATE}");
+    let build_date = chrono::Utc.timestamp_millis_opt(BUILD_DATE).single().expect("Invalid build date in binary");
+    debug!("BUILD_DATE: {BUILD_DATE} ({build_date:?}");
 
     debug!("NVS partition: {NVS_PARTITION:?}");
     debug!("OTA_0 partition: {OTA_0_PARTITION:?}");
@@ -332,24 +360,45 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
     let stack = stacks.tcp.stack();
 
     let mut http_client = http::Client::new(stack, rng);
-    let build_date = {
+    let new_build_date_millis = {
         let bytes = http_client.req::<20, _>(BUILD_DATE_URL).await?;
         let string = String::from_utf8(bytes)?;
         
         i64::from_str_radix(&string, 10)?
     };
-    debug!("Build dates. Local: {BUILD_DATE}, remote: {build_date}");
-    if build_date > BUILD_DATE {
-        info!("Update available!")
+    let remote_build_date = chrono::Utc.timestamp_millis_opt(new_build_date_millis).single()
+        .ok_or(Error::InvalidEpochDate)?;
+
+    debug!("Build dates. Local: {build_date:?}, remote: {remote_build_date:?}");
+    let do_update = if new_build_date_millis > BUILD_DATE {
+        info!("Update available!");
+        true
     } else {
         info!("No update available");
+        false
+    };
+
+    if true || do_update {
+        let mut ota = Ota::new(&mut flash);
+        ota.prepare_for_update()?;
+
+        let mut tot_bytes = 0;
+        http_client.req_buffered(FIRMWARE_URL, |buf| {
+            tot_bytes += buf.len();
+            ota.write_update(buf)?;
+
+            // debug!("{}", HEAP.stats());
+
+            Ok::<_, ota::Error>(())
+        }).await?;
+
+        ota.commit_update()?;
     }
 
-    loop { Timer::after_secs(10).await }
+    // loop { Timer::after_secs(10).await }
 
     #[allow(unreachable_code)]
-    let mut _ota = Ota::new(&mut flash);
-    // ota.read_select_entries()?;
+    
     // loop { Timer::after_secs(10).await }
 
     let channel = mk_static!(Channel::<CriticalSectionRawMutex, StepCommand, 10>, Channel::new());
@@ -400,6 +449,8 @@ pub enum Error {
     /// Error while parsing SSID or password
     ParseCredentials,
     MissingCredentials,
+
+    InvalidEpochDate,
 
     Wifi(wifi::WifiError),
 
@@ -454,5 +505,15 @@ impl From<Utf8Error> for Error {
 impl From<ParseIntError> for Error {
     fn from(value: ParseIntError) -> Self {
         Self::ParseIntError(value)
+    }
+}
+
+
+impl<E: Into<Error>> From<CallbackError<E>> for Error {
+    fn from(value: CallbackError<E>) -> Self {
+        match value {
+            CallbackError::Callback(e) => e.into(),
+            CallbackError::Outer(e) => e.into(),
+        }
     }
 }

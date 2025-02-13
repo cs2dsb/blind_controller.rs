@@ -4,7 +4,8 @@ use chrono::Utc;
 use dotenv::{dotenv, vars};
 
 fn main() -> Result<(), anyhow::Error> {
-    println!("cargo::rerun-if-changed=.env");
+    // Since the BUILD_DATE is needed every build we need to rerun build.rs every time anything changes
+    // println!("cargo::rerun-if-changed=.env");
     
     if Path::new(".env").exists() {
         dotenv()?;
