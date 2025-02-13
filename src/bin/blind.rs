@@ -4,8 +4,8 @@
 #![feature(impl_trait_in_assoc_type)]
 
 use core::{convert::Infallible, fmt::Write, num::ParseIntError, str::Utf8Error};
-
-use blind_controller::{http::{self, CallbackError}, logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
+use embedded_io_async::Write as EioWrite;
+use blind_controller::{rtc::enter_deep as enter_deep_sleep, http::{self, CallbackError}, logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
 use chrono::TimeZone;
 use const_format::concatcp;
 use embassy_executor::Spawner;
@@ -19,10 +19,10 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     gpio::{Level, Output},
-    peripherals::Peripherals,
+    peripherals::{Peripherals, LPWR},
     reset::{reset_reason, wakeup_cause},
     rng::Rng,
-    rtc_cntl::SocResetReason,
+    rtc_cntl::{Rtc, SocResetReason},
     timer::timg::TimerGroup,
     Config as HalConfig,
 };
@@ -31,8 +31,11 @@ use esp_storage::FlashStorage;
 use heapless::{String, Vec};
 use log::*;
 use picoserve::{
-    response::IntoResponse, routing::{get, parse_path_segment}, AppBuilder, AppRouter
+    response::{Content, IntoResponse}, routing::{get, parse_path_segment}, AppBuilder, AppRouter
 };
+use embassy_sync::mutex::Mutex;
+
+static UPDATE_PENDING: Mutex<CriticalSectionRawMutex, bool> = Mutex::new(false);
 
 const HEAP_MEMORY_SIZE: usize =  72 * 1024;
 
@@ -52,7 +55,7 @@ fn init_heap() {
 }
 
 // -3 is to reserve some for outgoing socket requests
-const WEB_TASK_POOL_SIZE: usize = wifi::STACK_SOCKET_COUNT - 3;
+const WEB_TASK_POOL_SIZE: usize = 2;//wifi::STACK_SOCKET_COUNT - 3;
 
 const SSID: Option<&str> = option_env!("SSID");
 const PASSWORD: Option<&str> = option_env!("PASSWORD");
@@ -114,12 +117,38 @@ struct AppProps {
     sender: Sender<'static, CriticalSectionRawMutex, StepCommand, 10>,
 }
 
+struct Html<const LEN: usize> (String<LEN>);
+
+impl<const LEN: usize> Content for Html<LEN> {
+    fn content_type(&self) -> &'static str {
+        "text/html; charset=utf-8"
+    }
+
+    fn content_length(&self) -> usize {
+        self.0.len()
+    }
+
+    async fn write_content<W: EioWrite>(self, writer: W) -> Result<(), W::Error> {
+        self.0.as_bytes().write_content(writer).await
+    }
+}
+
 impl AppProps {
     async fn index() -> impl IntoResponse {
         let build_date = chrono::Utc.timestamp_millis_opt(BUILD_DATE).single().expect("Invalid build date in binary");
-        let mut buf = String::<64>::new();
-        let _ = write!(&mut buf, "Build date: {build_date:?}");
-        buf
+        let update_pending = *UPDATE_PENDING.lock().await;
+        let mut buf = String::<150>::new();
+        let _ = write!(&mut buf, "<p>Build date: {build_date:?}</p><p>Update pending: {update_pending:?}</p><a href='/reboot'>Reboot</a>");
+        Html(buf)
+    }
+    // TODO: have the handler finish and get an embassy task to actually reboot or something
+    #[allow(dependency_on_unit_never_type_fallback)]
+    async fn reboot() -> impl IntoResponse {
+        let rtc = Rtc::new(unsafe { LPWR::steal()});
+         enter_deep_sleep(
+             rtc,
+             Duration::from_secs(2).into(),
+         );
     }
 }
 
@@ -130,6 +159,7 @@ impl AppBuilder for AppProps {
         let Self { sender } = self;
         picoserve::Router::new()
             .route("/", get(|| Self::index()))
+            .route("/reboot", get(|| Self::reboot()))
             .route(
                 ("/forward", parse_path_segment::<usize>()),
                 get(move |n| async move {
@@ -234,12 +264,11 @@ async fn main(spawner: Spawner) {
     if let Err(error) = main_fallible(&spawner, peripherals).await {
         error!("Error while running firmware: {:?}", error);
 
-        // info!("Sleeping");
-        // let rtc = Rtc::new(unsafe { LPWR::steal()});
-        // enter_deep_sleep(
-        //     rtc,
-        //     Duration::from_secs(10).into(),
-        // );
+        let rtc = Rtc::new(unsafe { LPWR::steal()});
+        enter_deep_sleep(
+            rtc,
+            Duration::from_secs(10).into(),
+        );
     }
 }
 
@@ -378,7 +407,7 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
         false
     };
 
-    if true || do_update {
+    if do_update {
         let mut ota = Ota::new(&mut flash);
         ota.prepare_for_update()?;
 
@@ -394,12 +423,6 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
 
         ota.commit_update()?;
     }
-
-    // loop { Timer::after_secs(10).await }
-
-    #[allow(unreachable_code)]
-    
-    // loop { Timer::after_secs(10).await }
 
     let channel = mk_static!(Channel::<CriticalSectionRawMutex, StepCommand, 10>, Channel::new());
     let sender = channel.sender();

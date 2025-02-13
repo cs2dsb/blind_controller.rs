@@ -17,7 +17,7 @@ macro_rules! mk_static {
 pub mod logging;
 pub mod rng;
 pub mod partitions;
-
+pub mod rtc;
 #[cfg(feature = "storage")]
 pub mod nvs;
 
