@@ -2,7 +2,6 @@
 #![feature(sync_unsafe_cell)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(never_type)]
-#![feature(const_size_of_val)]
 
 #[macro_export]
 macro_rules! mk_static {
@@ -18,6 +17,8 @@ pub mod logging;
 pub mod rng;
 pub mod partitions;
 pub mod rtc;
+pub mod system_time;
+
 #[cfg(feature = "storage")]
 pub mod nvs;
 
@@ -29,3 +30,6 @@ pub mod wifi;
 
 #[cfg(feature = "wifi")]
 pub mod http;
+
+#[cfg(feature = "wifi")]
+pub mod ntp;

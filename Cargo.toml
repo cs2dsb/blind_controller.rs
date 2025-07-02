@@ -49,6 +49,9 @@ reqwless = {  version = "0.13.0", default-features = false, features = [
 embedded-io-async = "0.6.1"
 # http_io = { version = "0.3.0", default-features = false, features = ["ssl-rustls"] }
 chrono = { version = "0.4.39", default-features = false }
+sunrise = { version = "2.1.0", default-features = false, features = [ "libm" ] }
+sntpc = { version = "0.5.2", default-features = false, features = [ "embassy-socket" ] }
+time = { version = "0.3", default-features = false }
 
 [features]
 default = [ "esp32", "dep:esp-wifi", "esp-alloc", "esp-hal-embassy" ]

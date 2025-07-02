@@ -5,7 +5,7 @@
 
 use core::{convert::Infallible, fmt::Write, num::ParseIntError, str::Utf8Error};
 use embedded_io_async::Write as EioWrite;
-use blind_controller::{rtc::enter_deep as enter_deep_sleep, http::{self, CallbackError}, logging, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
+use blind_controller::{http::{self, CallbackError}, logging, ntp, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, rtc::enter_deep as enter_deep_sleep, system_time::SystemTime, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
 use chrono::TimeZone;
 use const_format::concatcp;
 use embassy_executor::Spawner;
@@ -34,6 +34,7 @@ use picoserve::{
     response::{Content, IntoResponse}, routing::{get, parse_path_segment}, AppBuilder, AppRouter
 };
 use embassy_sync::mutex::Mutex;
+use time::{error::ComponentRange, Date, Month, OffsetDateTime, Time, UtcOffset, Weekday};
 
 static UPDATE_PENDING: Mutex<CriticalSectionRawMutex, bool> = Mutex::new(false);
 
@@ -59,13 +60,14 @@ const WEB_TASK_POOL_SIZE: usize = 2; // wifi::STACK_SOCKET_COUNT - 3;
 
 const SSID: Option<&str> = option_env!("SSID");
 const PASSWORD: Option<&str> = option_env!("PASSWORD");
+const NTP_SERVER: &str = env!("NTP_SERVER");
+
 const BUILD_DATE: i64 = { match i64::from_str_radix(env!("BUILD_DATE"), 10) {
     Ok(v) => v,
     Err(_) => panic!("BUILD_DATE env variable failed to parse as i64"),
 }};
 const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
 const RELEASE_URL: &str = "https://github.com/cs2dsb/blind_controller.rs/releases/latest/download/";
-// const RELEASE_URL: &str = "https://www.covvee.com/static/covvee/blind/";
 const BUILD_DATE_URL: &str = concatcp!(RELEASE_URL, "BUILD_DATE_", TARGET_TRIPLE); 
 const FIRMWARE_URL: &str = concatcp!(RELEASE_URL, "blind_", TARGET_TRIPLE); 
 
@@ -80,7 +82,7 @@ macro_rules! mk_static {
     }};
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum StepCommand {
     Forward(usize),
     Backward(usize),
@@ -141,6 +143,19 @@ impl AppProps {
         let _ = write!(&mut buf, "<p>Build date: {build_date:?}</p><p>Update pending: {update_pending:?}</p><a href='/reboot'>Reboot</a>");
         Html(buf)
     }
+    async fn time() -> impl IntoResponse {
+        let st = SystemTime {};
+        let configured = st.configured();
+        let mut set = true;
+        let time = st.datetime().unwrap_or_else(|_| {
+            set = false;
+            OffsetDateTime::UNIX_EPOCH
+        });
+
+        let mut buf = String::<150>::new();
+        let _ = write!(&mut buf, "<p>Configured: {configured:?}</p><p>Time set: {set:?}</p><p>Time: {time:?}</p>");
+        Html(buf)
+    }
     // TODO: have the handler finish and get an embassy task to actually reboot or something
     #[allow(dependency_on_unit_never_type_fallback)]
     async fn reboot() -> impl IntoResponse {
@@ -159,6 +174,7 @@ impl AppBuilder for AppProps {
         let Self { sender } = self;
         picoserve::Router::new()
             .route("/", get(|| Self::index()))
+            .route("/time", get(|| Self::time()))
             .route("/reboot", get(|| Self::reboot()))
             .route(
                 ("/forward", parse_path_segment::<usize>()),
@@ -192,6 +208,112 @@ impl AppBuilder for AppProps {
                     "Lower"
                 }),
             )
+    }
+}
+
+#[embassy_executor::task]
+async fn schedule_task(sender: Sender<'static, CriticalSectionRawMutex, StepCommand, 10>) -> ! {
+    let system_time = SystemTime {};
+
+    while !system_time.ntp_synchronized() {
+        debug!("schedule_task awaiting ntp sync");
+        Timer::after(Duration::from_secs(2)).await;
+    }
+
+    let raise = Time::from_hms(12, 30, 0).unwrap();
+    let lower = Time::from_hms(19, 30, 0).unwrap();
+    let mut state = None;
+
+    loop {
+        let state = &mut state;
+        let r: Result<(), Error> = async {
+            let time = system_time.datetime()?.time();
+
+            let action = match (&state, time >= lower, time >= raise) {
+                (None | Some(StepCommand::Raise), true, _) => {
+                    Some(StepCommand::Lower)
+                },
+                (None | Some(StepCommand::Lower), false, true) => {
+                    Some(StepCommand::Raise)
+                },
+                (None, false, false) => {
+                    // If it's before the raise time it means it is the following day past the lower time
+                    Some(StepCommand::Lower)
+                },
+                _ => None
+            };
+
+            if let Some(action) = action {
+                *state = Some(action);
+                info!("schedule_task sending command: {action:?}");
+                sender.send(action).await;
+            }
+
+            Ok(())
+        }.await;
+
+        if let Err(e) = r {
+            error!("schedule_task error: {e:?}");
+        }
+
+        debug!("schedule_task sleeping");
+        Timer::after(Duration::from_secs(60)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn ntp_task(mut client: ntp::Client, mut system_time: SystemTime) -> ! {
+    let mut first_run = !system_time.configured();
+    
+    loop {
+        let r: Result<(), Error> = async {
+            debug!("ntp_task sending request");
+            let (_, offset) = client.ntp_request(&mut system_time, !first_run).await?;
+            first_run = false;
+            debug!("NTP updated. Offset = {offset}");
+
+            // In the UK the clocks go forward 1 hour at 1am on the last Sunday in March, and back 1 hour at 2am on the last Sunday in October. 
+            let datetime = system_time.datetime()?;
+            let year = datetime.year();
+
+            let forward = Date::from_calendar_date(year, Month::April, 1)?
+                .nth_prev_occurrence(Weekday::Sunday, 1);
+            let backward = Date::from_calendar_date(year, Month::November, 1)?
+                .nth_prev_occurrence(Weekday::Sunday, 1);
+
+            debug!("Forward: {forward:?}, Backward: {backward}");
+            
+            let forward = OffsetDateTime::new_utc(forward, Time::from_hms(1, 0, 0)?);
+            let backward = OffsetDateTime::new_utc(backward, Time::from_hms(2, 0, 0)?);
+
+            let current_offset = system_time.offset()?;
+           
+            let change = if current_offset.is_positive() && datetime >= backward {
+                Some(UtcOffset::UTC)
+            } else if current_offset.is_utc() && datetime >= forward {
+                Some(UtcOffset::from_hms(1, 0, 0)?)
+            } else {
+                None
+            };
+
+            if let Some(change) = change {
+                debug!("Changing offset to {change:?}");
+                system_time.set_offset(change);
+            }
+
+            system_time.set_ntp_synchronized(true);
+
+            Ok(())
+        }.await;
+
+        if let Err(e) = r {
+            error!("npt_task error: {e:?}");
+        }
+
+        debug!("ntp_task sleeping");
+        Timer::after(Duration::from_secs(60 * 60)).await;
+        // Timer::after(Duration::from_secs(60)).await;
+        
     }
 }
 
@@ -441,7 +563,20 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
     let _tmc_ms1 = Output::new(peripherals.GPIO27, Level::High);
     let _tmc_ms2 = Output::new(peripherals.GPIO26, Level::Low);
 
+    
+    let mut system_time = SystemTime {};
+    
+    // Configured persists after restarts other than hard resets
+    if !system_time.configured() {
+        // TODO: timezone
+        system_time.configure(UtcOffset::UTC);
+    }
+
+    let ntp_client = ntp::Client::new_from_dns(stacks.ntp, NTP_SERVER).await?;
+
     spawner.must_spawn(motor_task(receiver, tmc_en, tmc_step, tmc_dir, 2));
+    spawner.must_spawn(ntp_task(ntp_client, system_time));
+    spawner.must_spawn(schedule_task(sender));
 
     let app = &*mk_static!(AppRouter<AppProps>, AppProps { sender }.build_app());
     let config = &*mk_static!(
@@ -480,6 +615,7 @@ pub enum Error {
 
     Nvs(nvs::Error),
     Ota(ota::Error),
+    Ntp(ntp::Error),
 
     Http(http::Error),
 
@@ -488,8 +624,21 @@ pub enum Error {
     ParseIntError(ParseIntError),
 
     Timeout(&'static str),
+
+    Date(ComponentRange),
 }
 
+impl From<ComponentRange> for Error {
+    fn from(value: ComponentRange) -> Self {
+        Self::Date(value)
+    }
+}
+
+impl From<ntp::Error> for Error {
+    fn from(value: ntp::Error) -> Self {
+        Self::Ntp(value)
+    }
+}
 impl From<Infallible> for Error {
     fn from(value: Infallible) -> Self {
         Self::Impossible(value)

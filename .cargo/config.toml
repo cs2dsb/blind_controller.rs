@@ -32,6 +32,7 @@ rustdocflags = [
 ESP_LOG = "TRACE"
 # smoltcp panics if more DNS servers than this value are returned, the default is 1
 SMOLTCP_DNS_MAX_SERVER_COUNT = "2"
+NTP_SERVER = "uk.pool.ntp.org"
 
 [unstable]
 build-std = ["alloc", "core"]
