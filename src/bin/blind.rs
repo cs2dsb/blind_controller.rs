@@ -4,7 +4,7 @@
 #![feature(impl_trait_in_assoc_type)]
 
 use core::{convert::Infallible, fmt::Write, num::ParseIntError, str::Utf8Error};
-use embedded_io_async::Write as EioWrite;
+use embedded_io_async::{Read, Write as EioWrite};
 use blind_controller::{http::{self, CallbackError}, logging, ntp, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, rtc::enter_deep as enter_deep_sleep, system_time::SystemTime, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
 use chrono::{NaiveDate, TimeZone, Timelike};
 use const_format::concatcp;
@@ -31,7 +31,7 @@ use esp_storage::FlashStorage;
 use heapless::{String, Vec};
 use log::*;
 use picoserve::{
-    response::{Content, IntoResponse}, routing::{get, parse_path_segment}, AppBuilder, AppRouter
+    response::{Content, IntoResponse, ResponseWriter}, routing::{get, parse_path_segment}, AppBuilder, AppRouter
 };
 use embassy_sync::mutex::Mutex;
 use sunrise::{Coordinates, SolarDay, SolarEvent};
@@ -174,6 +174,59 @@ impl AppProps {
     }
 }
 
+struct NoStoreResponseWriter<W> {
+    response_writer: W,
+}
+
+impl<W: ResponseWriter> ResponseWriter for NoStoreResponseWriter<W> {
+    type Error = W::Error;
+
+    async fn write_response<
+        R: Read<Error = Self::Error>,
+        H: picoserve::response::HeadersIter,
+        B: picoserve::response::Body,
+    >(
+        self,
+        connection: picoserve::response::Connection<'_, R>,
+        response: picoserve::response::Response<H, B>,
+    ) -> Result<picoserve::ResponseSent, Self::Error> {
+        let response = response.with_header("Cache-Control", "no-store");
+
+        self
+            .response_writer
+            .write_response(connection, response)
+            .await
+    }
+}
+
+struct NoStoreLayer;
+
+impl<State, PathParameters> picoserve::routing::Layer<State, PathParameters> for NoStoreLayer {
+    type NextState = State;
+    type NextPathParameters = PathParameters;
+
+    async fn call_layer<
+        'a,
+        R: Read + 'a,
+        NextLayer: picoserve::routing::Next<'a, R, Self::NextState, Self::NextPathParameters>,
+        W: ResponseWriter<Error = R::Error>,
+    >(
+        &self,
+        next: NextLayer,
+        state: &State,
+        path_parameters: PathParameters,
+        request_parts: picoserve::request::RequestParts<'_>,
+        response_writer: W,
+    ) -> Result<picoserve::ResponseSent, W::Error> {
+        next.run(
+            state,
+            path_parameters,
+            NoStoreResponseWriter { response_writer },
+        )
+        .await
+    }
+}
+
 impl AppBuilder for AppProps {
     type PathRouter = impl picoserve::routing::PathRouter;
 
@@ -215,6 +268,7 @@ impl AppBuilder for AppProps {
                     "Lower"
                 }),
             )
+            .layer(NoStoreLayer)
     }
 }
 
