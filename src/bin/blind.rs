@@ -6,7 +6,7 @@
 use core::{convert::Infallible, fmt::Write, num::ParseIntError, str::Utf8Error};
 use embedded_io_async::Write as EioWrite;
 use blind_controller::{http::{self, CallbackError}, logging, ntp, nvs::{self, Nvs, MIN_OFFSET}, ota::{self, Ota}, partitions::{ NVS_PARTITION, OTA_0_PARTITION, OTA_1_PARTITION}, rtc::enter_deep as enter_deep_sleep, system_time::SystemTime, wifi::{self, PASSWORD_LEN, SSID_MAX_LEN}};
-use chrono::TimeZone;
+use chrono::{NaiveDate, TimeZone, Timelike};
 use const_format::concatcp;
 use embassy_executor::Spawner;
 use embassy_sync::{
@@ -34,6 +34,7 @@ use picoserve::{
     response::{Content, IntoResponse}, routing::{get, parse_path_segment}, AppBuilder, AppRouter
 };
 use embassy_sync::mutex::Mutex;
+use sunrise::{Coordinates, SolarDay, SolarEvent};
 use time::{error::ComponentRange, Date, Month, OffsetDateTime, Time, UtcOffset, Weekday};
 
 static UPDATE_PENDING: Mutex<CriticalSectionRawMutex, bool> = Mutex::new(false);
@@ -71,6 +72,10 @@ const RELEASE_URL: &str = "https://github.com/cs2dsb/blind_controller.rs/release
 const BUILD_DATE_URL: &str = concatcp!(RELEASE_URL, "BUILD_DATE_", TARGET_TRIPLE); 
 const FIRMWARE_URL: &str = concatcp!(RELEASE_URL, "blind_", TARGET_TRIPLE); 
 
+const LATITUDE: &str = env!("LATITUDE");
+const LONGITUDE: &str = env!("LONGITUDE");
+// const LAT_LONG: Coordinates = { match }
+
 const BLIND_HEIGHT: usize = 4450;
 
 macro_rules! mk_static {
@@ -82,7 +87,7 @@ macro_rules! mk_static {
     }};
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum StepCommand {
     Forward(usize),
     Backward(usize),
@@ -117,6 +122,7 @@ async fn web_task(
 
 struct AppProps {
     sender: Sender<'static, CriticalSectionRawMutex, StepCommand, 10>,
+    coordinates: Coordinates,
 }
 
 struct Html<const LEN: usize> (String<LEN>);
@@ -143,7 +149,7 @@ impl AppProps {
         let _ = write!(&mut buf, "<p>Build date: {build_date:?}</p><p>Update pending: {update_pending:?}</p><a href='/reboot'>Reboot</a>");
         Html(buf)
     }
-    async fn time() -> impl IntoResponse {
+    async fn time(coordinates: Coordinates) -> impl IntoResponse {
         let st = SystemTime {};
         let configured = st.configured();
         let mut set = true;
@@ -151,9 +157,10 @@ impl AppProps {
             set = false;
             OffsetDateTime::UNIX_EPOCH
         });
+        let sunset = calculate_sunset(&time, coordinates);
 
         let mut buf = String::<150>::new();
-        let _ = write!(&mut buf, "<p>Configured: {configured:?}</p><p>Time set: {set:?}</p><p>Time: {time:?}</p>");
+        let _ = write!(&mut buf, "<p>Configured: {configured:?}</p><p>Time set: {set:?}</p><p>Time: {time:?}</p><p>Sunset: {sunset:?}</p>");
         Html(buf)
     }
     // TODO: have the handler finish and get an embassy task to actually reboot or something
@@ -171,10 +178,10 @@ impl AppBuilder for AppProps {
     type PathRouter = impl picoserve::routing::PathRouter;
 
     fn build_app(self) -> picoserve::Router<Self::PathRouter> {
-        let Self { sender } = self;
+        let Self { sender, coordinates } = self;
         picoserve::Router::new()
             .route("/", get(|| Self::index()))
-            .route("/time", get(|| Self::time()))
+            .route("/time", get(move || Self::time(coordinates)))
             .route("/reboot", get(|| Self::reboot()))
             .route(
                 ("/forward", parse_path_segment::<usize>()),
@@ -211,8 +218,23 @@ impl AppBuilder for AppProps {
     }
 }
 
+fn calculate_sunset(datetime: &OffsetDateTime, coordinates: Coordinates) -> Result<OffsetDateTime, Error> {
+    let date = NaiveDate::from_ymd_opt(datetime.year(), datetime.month() as u32, datetime.day() as u32)
+        .ok_or(Error::Other("Failed to convert time::Date into chrono::NaiveDate"))?;
+    let day = SolarDay::new(coordinates, date);
+    let sunset = day.event_time(SolarEvent::Sunset);
+    let offset_sunset = datetime
+        .replace_hour(sunset.hour() as u8)?
+        .replace_minute(sunset.minute() as u8)?
+        .replace_second(sunset.second() as u8)?;
+
+    debug!("Sunset is at {offset_sunset}");
+
+    Ok(offset_sunset)
+}
+
 #[embassy_executor::task]
-async fn schedule_task(sender: Sender<'static, CriticalSectionRawMutex, StepCommand, 10>) -> ! {
+async fn schedule_task(sender: Sender<'static, CriticalSectionRawMutex, StepCommand, 10>, coordinates: Coordinates) -> ! {
     let system_time = SystemTime {};
 
     while !system_time.ntp_synchronized() {
@@ -221,22 +243,29 @@ async fn schedule_task(sender: Sender<'static, CriticalSectionRawMutex, StepComm
     }
 
     let raise = Time::from_hms(12, 30, 0).unwrap();
-    let lower = Time::from_hms(19, 30, 0).unwrap();
     let mut state = None;
 
     loop {
         let state = &mut state;
         let r: Result<(), Error> = async {
-            let time = system_time.datetime()?.time();
+            let datetime = system_time.datetime()?;
+            
+            let sunset = if state == &Some(StepCommand::Raise) {
+                Some(calculate_sunset(&datetime, coordinates)?)
+            } else {
+                None
+            };
 
-            let action = match (&state, time >= lower, time >= raise) {
-                (None | Some(StepCommand::Raise), true, _) => {
+            let time = datetime.time();
+
+            let action = match (&state, sunset.map(|v| v.time() <= time), time >= raise) {
+                (None | Some(StepCommand::Raise), Some(true), _) => {
                     Some(StepCommand::Lower)
                 },
-                (None | Some(StepCommand::Lower), false, true) => {
+                (None | Some(StepCommand::Lower), None | Some(false), true) => {
                     Some(StepCommand::Raise)
                 },
-                (None, false, false) => {
+                (None, None | Some(false), false) => {
                     // If it's before the raise time it means it is the following day past the lower time
                     Some(StepCommand::Lower)
                 },
@@ -401,6 +430,11 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
 
     let build_date = chrono::Utc.timestamp_millis_opt(BUILD_DATE).single().expect("Invalid build date in binary");
     debug!("BUILD_DATE: {BUILD_DATE} ({build_date:?}");
+
+    let latitude = str::parse::<f64>(LATITUDE).expect("LATITUDE environment variable couldn't be parsed as a f64");
+    let longitude = str::parse::<f64>(LONGITUDE).expect("LONGITUDE environment variable couldn't be parsed as a f64");
+    let coordinates = Coordinates::new(latitude, longitude)
+        .expect("Latitude or Longitude out of range");
 
     debug!("NVS partition: {NVS_PARTITION:?}");
     debug!("OTA_0 partition: {OTA_0_PARTITION:?}");
@@ -576,9 +610,9 @@ async fn main_fallible(spawner: &Spawner, peripherals: Peripherals) -> Result<()
 
     spawner.must_spawn(motor_task(receiver, tmc_en, tmc_step, tmc_dir, 2));
     spawner.must_spawn(ntp_task(ntp_client, system_time));
-    spawner.must_spawn(schedule_task(sender));
+    spawner.must_spawn(schedule_task(sender, coordinates));
 
-    let app = &*mk_static!(AppRouter<AppProps>, AppProps { sender }.build_app());
+    let app = &*mk_static!(AppRouter<AppProps>, AppProps { sender, coordinates }.build_app());
     let config = &*mk_static!(
         picoserve::Config<Duration>,
         picoserve::Config::new(picoserve::Timeouts {
@@ -626,6 +660,7 @@ pub enum Error {
     Timeout(&'static str),
 
     Date(ComponentRange),
+    Other(&'static str),
 }
 
 impl From<ComponentRange> for Error {
