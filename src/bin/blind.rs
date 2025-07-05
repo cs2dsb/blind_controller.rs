@@ -215,7 +215,7 @@ impl<State, PathParameters> picoserve::routing::Layer<State, PathParameters> for
         next: NextLayer,
         state: &State,
         path_parameters: PathParameters,
-        request_parts: picoserve::request::RequestParts<'_>,
+        _request_parts: picoserve::request::RequestParts<'_>,
         response_writer: W,
     ) -> Result<picoserve::ResponseSent, W::Error> {
         next.run(
@@ -297,36 +297,34 @@ async fn schedule_task(sender: Sender<'static, CriticalSectionRawMutex, StepComm
     }
 
     let raise = Time::from_hms(12, 30, 0).unwrap();
+    let mut sunset: Option<OffsetDateTime> = None;
     let mut state = None;
 
     loop {
         let state = &mut state;
+        let sunset = &mut sunset;
         let r: Result<(), Error> = async {
             let datetime = system_time.datetime()?;
-            
-            let sunset = if state == &Some(StepCommand::Raise) {
-                Some(calculate_sunset(&datetime, coordinates)?)
-            } else {
-                None
-            };
+            let new_day = sunset.as_ref().map_or(true, |sunset| sunset.date() != datetime.date());
+
+            if new_day {
+                *sunset = Some(calculate_sunset(&datetime, coordinates)?);
+            }
 
             let time = datetime.time();
 
-            let action = match (&state, sunset.map(|v| v.time() <= time), time >= raise) {
-                (None | Some(StepCommand::Raise), Some(true), _) => {
-                    Some(StepCommand::Lower)
-                },
-                (None | Some(StepCommand::Lower), None | Some(false), true) => {
-                    Some(StepCommand::Raise)
-                },
-                (None, None | Some(false), false) => {
-                    // If it's before the raise time it means it is the following day past the lower time
-                    Some(StepCommand::Lower)
-                },
-                _ => None
+            let action = match (sunset.map(|v| v.time() <= time), raise <= time) {
+                // It's after sunset
+                (Some(true), _) => StepCommand::Lower,
+                // It's before sunset but after raise time
+                (Some(false), true) => StepCommand::Raise,
+                // It's after midnight but before raise time
+                (Some(false), false) => StepCommand::Lower,
+
+                (None, _) => unreachable!(),
             };
 
-            if let Some(action) = action {
+            if *state != Some(action) {
                 *state = Some(action);
                 info!("schedule_task sending command: {action:?}");
                 sender.send(action).await;
